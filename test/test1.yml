@@ -1,0 +1,16 @@
+---
+
+- name: Test Local Tasks
+  hosts: ["localhost"]
+  strategy: retry
+  tasks:
+
+   - name: "Success 1"
+     command: /bin/bash -c "echo 'hi'"
+
+   - name: "Fail 1"
+     command: /bin/bash -c "asdf"
+
+   - name: "Success 2"
+     command: /bin/bash -c "echo 'hi'"
+
