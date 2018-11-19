@@ -471,11 +471,11 @@ class StrategyModule(StrategyBase):
 
                             msg = "Running PDB.  Refer to https://pymotw.com/2/pdb/ for instruction.\n\n"
                             msg += "Commmon commands:\n\n"
-                            msg += "Print the task's error message: print(failure_debug_message)\n"
                             msg += 'Add a variable to a host: host_to_edit = hosts_left[0]; task._variable_manager.set_host_variable(host_to_edit,"new_var_key","new_var_value")\n'
-                            msg += 'Print task vars: print(task_vars["var_key_name"])\n'
+                            msg += 'Print task vars: print(self._variable_manager.get_vars(play=iterator._play, host=host, task=task)["new_var_key"])\n'
 
                             display.display(msg, color='blue', stderr=False, screen_only=False, log_only=False)
+                            import pdb
                             pdb.set_trace()
 
             except (IOError, EOFError) as e:
