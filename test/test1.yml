@@ -3,6 +3,8 @@
 - name: Test Local Tasks
   hosts: ["localhost"]
   strategy: retry
+  roles:
+   - test
   tasks:
 
    - name: "Success 1"
@@ -14,3 +16,10 @@
    - name: "Success 2"
      command: /bin/bash -c "echo 'hi'"
 
+   - name: "Random Success 1"
+     command: /bin/bash -c "echo $RANDOM | head -c 1 | grep -e [5-9]"
+     register: output
+
+   - name: "Success 3"
+     debug:
+       msg: "{{ output.stdout }}"

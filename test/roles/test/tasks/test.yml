@@ -1,0 +1,18 @@
+---
+
+ - name: "Success 1"
+   command: /bin/bash -c "echo 'hi'"
+
+ - name: "Fail 1"
+   command: /bin/bash -c "asdf"
+
+ - name: "Success 2"
+   command: /bin/bash -c "echo 'hi'"
+
+ - name: "Random Success 1"
+   command: /bin/bash -c "echo $RANDOM | head -c 1 | grep -e [5-9]"
+   register: output
+
+ - name: "Success 3"
+   debug:
+     msg: "{{ output.stdout }}"
