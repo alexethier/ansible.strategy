@@ -16,3 +16,7 @@
  - name: "Success 3"
    debug:
      msg: "{{ output.stdout }}"
+
+ # Test the case where the last task in a role fails and there is another role queued behind it.
+ - name: "Fail 2"
+   command: /bin/bash -c "asdf"

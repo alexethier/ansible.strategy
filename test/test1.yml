@@ -5,6 +5,7 @@
   strategy: retry
   roles:
    - test
+   - success
   tasks:
 
    - name: "Success 1"

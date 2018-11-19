@@ -1,0 +1,4 @@
+---
+
+ - name: "Role Success 1"
+   command: /bin/bash -c "echo 'hi'"
