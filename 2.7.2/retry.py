@@ -31,7 +31,7 @@ DOCUMENTATION = '''
     author: Ansible Core Team
 '''
 
-from ansible.errors import AnsibleError
+from ansible.errors import AnsibleError, AnsibleAssertionError
 from ansible.executor.play_iterator import PlayIterator
 from ansible.module_utils.six import iteritems
 from ansible.module_utils._text import to_text
@@ -51,6 +51,36 @@ except ImportError:
 
 
 class StrategyModule(StrategyBase):
+
+    noop_task = None
+
+    def _replace_with_noop(self, target):
+        if self.noop_task is None:
+            raise AnsibleAssertionError('strategy.linear.StrategyModule.noop_task is None, need Task()')
+
+        result = []
+        for el in target:
+            if isinstance(el, Task):
+                result.append(self.noop_task)
+            elif isinstance(el, Block):
+                result.append(self._create_noop_block_from(el, el._parent))
+        return result
+
+    def _create_noop_block_from(self, original_block, parent):
+        noop_block = Block(parent_block=parent)
+        noop_block.block = self._replace_with_noop(original_block.block)
+        noop_block.always = self._replace_with_noop(original_block.always)
+        noop_block.rescue = self._replace_with_noop(original_block.rescue)
+
+        return noop_block
+
+    def _prepare_and_create_noop_block_from(self, original_block, parent, iterator):
+        self.noop_task = Task()
+        self.noop_task.action = 'meta'
+        self.noop_task.args['_raw_params'] = 'noop'
+        self.noop_task.set_loader(iterator._play._loader)
+
+        return self._create_noop_block_from(original_block, parent)
 
     def _get_next_task_lockstep(self, hosts, iterator):
         '''
@@ -83,7 +113,7 @@ class StrategyModule(StrategyBase):
         if host_tasks_to_run:
             try:
                 lowest_cur_block = min(
-                    (s.cur_block for h, (s, t) in host_tasks_to_run
+                    (iterator.get_active_state(s).cur_block for h, (s, t) in host_tasks_to_run
                      if s.run_state != PlayIterator.ITERATING_COMPLETE))
             except ValueError:
                 lowest_cur_block = None
@@ -95,6 +125,7 @@ class StrategyModule(StrategyBase):
         for (k, v) in host_tasks_to_run:
             (s, t) = v
 
+            s = iterator.get_active_state(s)
             if s.cur_block > lowest_cur_block:
                 # Not the current block, ignore it
                 continue
@@ -128,6 +159,7 @@ class StrategyModule(StrategyBase):
                 if host_state_task is None:
                     continue
                 (s, t) = host_state_task
+                s = iterator.get_active_state(s)
                 if t is None:
                     continue
                 if s.run_state == cur_state and s.cur_block == cur_block:
@@ -207,24 +239,24 @@ class StrategyModule(StrategyBase):
                     for (host, task) in host_tasks:
                         if not task:
                             continue
-    
+
                         if self._tqm._terminated:
                             break
-    
+
                         run_once = False
                         work_to_do = True
-    
+
                         # test to see if the task across all hosts points to an action plugin which
                         # sets BYPASS_HOST_LOOP to true, or if it has run_once enabled. If so, we
                         # will only send this task to the first host in the list.
-    
+
                         try:
                             action = action_loader.get(task.action, class_only=True)
                         except KeyError:
                             # we don't care here, because the action may simply not have a
                             # corresponding action plugin
                             action = None
-    
+
                         # check to see if this task should be skipped, due to it being a member of a
                         # role which has already run (and whether that role allows duplicate execution)
                         if task._role and task._role.has_run(host):
@@ -233,13 +265,15 @@ class StrategyModule(StrategyBase):
                             if task._role._metadata is None or task._role._metadata and not task._role._metadata.allow_duplicates:
                                 display.debug("'%s' skipped because role has already run" % task)
                                 continue
-    
+
                         if task.action == 'meta':
                             # for the linear strategy, we run meta tasks just once and for
                             # all hosts currently being iterated over rather than one host
                             results.extend(self._execute_meta(task, play_context, iterator, host))
-                            if task.args.get('_raw_params', None) != 'noop':
+                            if task.args.get('_raw_params', None) not in ('noop', 'reset_connection'):
                                 run_once = True
+                            if (task.any_errors_fatal or run_once) and not task.ignore_errors:
+                                any_errors_fatal = True
                         else:
                             # handle step if needed, skip meta actions as they are used internally
                             if self._step and choose_step:
@@ -248,18 +282,18 @@ class StrategyModule(StrategyBase):
                                 else:
                                     skip_rest = True
                                     break
-    
+
                             display.debug("getting variables")
                             task_vars = self._variable_manager.get_vars(play=iterator._play, host=host, task=task)
                             self.add_tqm_variables(task_vars, play=iterator._play)
                             templar = Templar(loader=self._loader, variables=task_vars)
                             display.debug("done getting variables")
-    
+
                             run_once = templar.template(task.run_once) or action and getattr(action, 'BYPASS_HOST_LOOP', False)
-    
+
                             if (task.any_errors_fatal or run_once) and not task.ignore_errors:
                                 any_errors_fatal = True
-    
+
                             if not callback_sent:
                                 display.debug("sending task start callback, copying the task so we can template it temporarily")
                                 saved_name = task.name
@@ -271,57 +305,50 @@ class StrategyModule(StrategyBase):
                                     # just ignore any errors during task name templating,
                                     # we don't care if it just shows the raw name
                                     display.debug("templating failed for some reason")
-                                    pass
                                 display.debug("here goes the callback...")
                                 self._tqm.send_callback('v2_playbook_on_task_start', task, is_conditional=False)
                                 task.name = saved_name
                                 callback_sent = True
                                 display.debug("sending task start callback")
-   
-                            if host not in succeeded_hosts: 
+
+                            if host not in succeeded_hosts:
                                 self._blocked_hosts[host.get_name()] = True
                                 self._queue_task(host, task, task_vars, play_context)
                             del task_vars
-    
+
                         # if we're bypassing the host loop, break out now
                         if run_once:
                             break
-    
+
                         results += self._process_pending_results(iterator, max_passes=max(1, int(len(self._tqm._workers) * 0.1)))
-    
+
                     # go to next host/task group
                     if skip_rest:
                         continue
-    
+
                     display.debug("done queuing things up, now waiting for results queue to drain")
                     if self._pending_results > 0:
                         results += self._wait_on_pending_results(iterator)
-    
+
                     host_results.extend(results)
-    
+
+                    self.update_active_connections(results)
+
                     try:
                         included_files = IncludedFile.process_include_results(
                             host_results,
-                            self._tqm,
                             iterator=iterator,
-                            inventory=self._inventory,
                             loader=self._loader,
                             variable_manager=self._variable_manager
                         )
                     except AnsibleError as e:
                         # this is a fatal error, so we abort here regardless of block state
                         return self._tqm.RUN_ERROR
-    
+
                     include_failure = False
                     if len(included_files) > 0:
                         display.debug("we have included files to process")
-    
-                        # A noop task for use in padding dynamic includes
-                        noop_task = Task()
-                        noop_task.action = 'meta'
-                        noop_task.args['_raw_params'] = 'noop'
-                        noop_task.set_loader(iterator._play._loader)
-    
+
                         display.debug("generating all_blocks data")
                         all_blocks = dict((host, []) for host in hosts_left)
                         display.debug("done generating all_blocks data")
@@ -331,9 +358,8 @@ class StrategyModule(StrategyBase):
                             # list of noop tasks, to make sure that they continue running in lock-step
                             try:
                                 if included_file._is_role:
-                                    new_ir = included_file._task.copy()
-                                    new_ir.vars.update(included_file._args)
-    
+                                    new_ir = self._copy_included_file(included_file)
+
                                     new_blocks, handler_blocks = new_ir.get_block_list(
                                         play=iterator._play,
                                         variable_manager=self._variable_manager,
@@ -342,29 +368,26 @@ class StrategyModule(StrategyBase):
                                     self._tqm.update_handler_list([handler for handler_block in handler_blocks for handler in handler_block.block])
                                 else:
                                     new_blocks = self._load_included_file(included_file, iterator=iterator)
-    
+
                                 display.debug("iterating over new_blocks loaded from include file")
                                 for new_block in new_blocks:
                                     task_vars = self._variable_manager.get_vars(
                                         play=iterator._play,
-                                        task=included_file._task,
+                                        task=new_block._parent
                                     )
                                     display.debug("filtering new block on tags")
                                     final_block = new_block.filter_tagged_tasks(play_context, task_vars)
                                     display.debug("done filtering new block on tags")
-    
-                                    noop_block = Block(parent_block=task._parent)
-                                    noop_block.block = [noop_task for t in new_block.block]
-                                    noop_block.always = [noop_task for t in new_block.always]
-                                    noop_block.rescue = [noop_task for t in new_block.rescue]
-    
+
+                                    noop_block = self._prepare_and_create_noop_block_from(final_block, task._parent, iterator)
+
                                     for host in hosts_left:
                                         if host in included_file._hosts:
                                             all_blocks[host].append(final_block)
                                         else:
                                             all_blocks[host].append(noop_block)
                                 display.debug("done iterating over new_blocks loaded from include file")
-    
+
                             except AnsibleError as e:
                                 for host in included_file._hosts:
                                     self._tqm._failed_hosts[host.name] = True
@@ -372,24 +395,26 @@ class StrategyModule(StrategyBase):
                                 display.error(to_text(e), wrap_text=False)
                                 include_failure = True
                                 continue
-    
+
                         # finally go through all of the hosts and append the
                         # accumulated blocks to their list of tasks
                         display.debug("extending task lists for all hosts with included blocks")
-    
+
                         for host in hosts_left:
                             iterator.add_tasks(host, all_blocks[host])
-    
+
                         display.debug("done extending task lists")
                         display.debug("done processing included files")
-    
+
                     display.debug("results queue empty")
-    
+
                     display.debug("checking for any_errors_fatal")
                     failed_hosts = []
                     unreachable_hosts = []
                     for res in results:
-                        if res.is_failed() and iterator.is_failed(res._host):
+                        # execute_meta() does not set 'failed' in the TaskResult
+                        # so we skip checking it with the meta tasks and look just at the iterator
+                        if (res.is_failed() or res._task.action == 'meta') and iterator.is_failed(res._host):
                             failed_hosts.append(res._host.name)
                         elif res.is_unreachable():
                             unreachable_hosts.append(res._host.name)
